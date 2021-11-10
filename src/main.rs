@@ -3,7 +3,7 @@ use error::Error::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use warp::{reject, reply, Filter, Rejection, Reply};
 
 mod auth;
@@ -11,7 +11,7 @@ mod error;
 
 type Result<T> = std::result::Result<T, error::Error>;
 type WebResult<T> = std::result::Result<T, Rejection>;
-type Users = Arc<HashMap<String, User>>;
+type Users = Arc<RwLock<HashMap<String, User>>>;
 
 #[derive(Clone)]
 pub struct User {
@@ -34,7 +34,7 @@ pub struct LoginResponse {
 
 #[tokio::main]
 async fn main() {
-    let users = Arc::new(init_users());
+    let users = Arc::new(RwLock::new(init_users()));
 
     let login_route = warp::path!("login")
         .and(warp::post())
@@ -45,6 +45,7 @@ async fn main() {
     let user_route = warp::path!("user")
         .and(with_auth(Role::User))
         .and_then(user_handler);
+
     let admin_route = warp::path!("admin")
         .and(with_auth(Role::Admin))
         .and_then(admin_handler);
@@ -62,16 +63,21 @@ fn with_users(users: Users) -> impl Filter<Extract = (Users,), Error = Infallibl
 }
 
 pub async fn login_handler(users: Users, body: LoginRequest) -> WebResult<impl Reply> {
-    match users
-        .iter()
-        .find(|(_uid, user)| user.email == body.email && user.pw == body.pw)
-    {
-        Some((uid, user)) => {
-            let token = auth::create_jwt(&uid, &Role::from_str(&user.role))
-                .map_err(|e| reject::custom(e))?;
-            Ok(reply::json(&LoginResponse { token }))
+    match users.read() {
+        Ok(read_handle) => {
+            match read_handle
+                .iter()
+                .find(|(_uid, user)| user.email == body.email && user.pw == body.pw)
+            {
+                Some((uid, user)) => {
+                    let token = auth::create_jwt(&uid, &Role::from_str(&user.role))
+                        .map_err(|e| reject::custom(e))?;
+                    Ok(reply::json(&LoginResponse { token }))
+                }
+                None => Err(reject::custom(WrongCredentialsError)),
+            }
         }
-        None => Err(reject::custom(WrongCredentialsError)),
+        Err(_) => Err(reject()),
     }
 }
 
